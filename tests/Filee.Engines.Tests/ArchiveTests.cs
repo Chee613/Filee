@@ -16,6 +16,31 @@ namespace Filee.Engines.Tests;
 
 public class ArchiveTests(EngineFixture fx) : IClassFixture<EngineFixture>
 {
+    [Fact]
+    public async Task Extraction_never_overwrites_an_input_inside_its_destination()
+    {
+        SkipWithout7Zip();
+        var dir = fx.NewFolder();
+        var nested = Directory.CreateDirectory(Path.Combine(dir, "a")).FullName;
+        var original = Path.Combine(nested, "original.zip");
+        using (var zip = ZipFile.Open(original, ZipArchiveMode.Create))
+        using (var writer = new StreamWriter(zip.CreateEntry("keep.txt").Open()))
+            writer.Write("original");
+        var originalBytes = await File.ReadAllBytesAsync(original, Ct);
+        var archive = Path.Combine(dir, "a.zip");
+        using (var zip = ZipFile.Open(archive, ZipArchiveMode.Create))
+        using (var writer = new StreamWriter(zip.CreateEntry("original.zip").Open()))
+            writer.Write("replacement");
+        var preset = Extract;
+        preset.Output.Conflict = ConflictPolicy.Overwrite;
+
+        var job = await fx.ConvertAsync([archive, original], preset);
+
+        Assert.Equal(originalBytes, await File.ReadAllBytesAsync(original, Ct));
+        Assert.Equal(JobState.Completed, job.State);
+        Assert.Equal(Path.Combine(dir, "a (2)"), Assert.Single(job.Files[0].Outputs));
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private void SkipWithout7Zip()

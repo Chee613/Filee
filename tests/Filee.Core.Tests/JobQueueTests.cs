@@ -5,6 +5,64 @@ namespace Filee.Core.Tests;
 
 public class JobQueueTests
 {
+    [Theory]
+    [InlineData(ConflictPolicy.Rename)]
+    [InlineData(ConflictPolicy.Overwrite)]
+    [InlineData(ConflictPolicy.Skip)]
+    public async Task Failed_combination_releases_its_output_reservation(ConflictPolicy policy)
+    {
+        using var dir = new TempDir();
+        var source = dir.File("a.txt");
+        var combiner = new FakeCombiner { Throw = true };
+        await using var queue = new JobQueue(new ConverterCatalog([]), combiner: combiner);
+        var preset = new Preset { TargetFormat = "zip", Archive = { CombineIntoOne = true }, Output = { Conflict = policy } };
+
+        var failed = await Run(queue, [source], preset);
+        Assert.Equal(JobState.Failed, failed.State);
+        combiner.Throw = false;
+        var retried = await Run(queue, [source], preset);
+
+        Assert.Equal(JobState.Completed, retried.State);
+        Assert.Equal(Path.Combine(dir.Path, "a.zip"), Assert.Single(retried.Outputs));
+    }
+
+    [Fact]
+    public async Task Overwrite_keeps_both_outputs_when_a_batch_uses_one_name()
+    {
+        using var dir = new TempDir();
+        var first = dir.File("a.jpg");
+        var second = dir.File("b.jpg");
+        var existing = dir.File("converted.png", "old output");
+        await using var queue = new JobQueue(new ConverterCatalog([new FakeConverter("magick", new ConversionEdge("jpg", "png"))]));
+        var preset = new Preset { TargetFormat = "png", Output = { FileNamePattern = "converted", Conflict = ConflictPolicy.Overwrite } };
+
+        var job = await Run(queue, [first, second], preset);
+
+        Assert.Equal(JobState.Completed, job.State);
+        Assert.Equal(2, job.Outputs.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Contains(existing, job.Outputs);
+        Assert.Contains(Path.Combine(dir.Path, "converted (2).png"), job.Outputs);
+        Assert.Equal(["a.jpg→png by magick", "b.jpg→png by magick"], job.Outputs.Select(File.ReadAllText).Order(StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(ConflictPolicy.Overwrite)]
+    [InlineData(ConflictPolicy.Skip)]
+    public async Task Custom_output_name_never_overwrites_another_input(ConflictPolicy policy)
+    {
+        using var dir = new TempDir();
+        var first = dir.File("a.jpg", "first original");
+        var second = dir.File("b.png", "second original");
+        await using var queue = new JobQueue(new ConverterCatalog([new FakeConverter("magick", new ConversionEdge("jpg", "png"))]));
+        var preset = new Preset { TargetFormat = "png", Output = { FileNamePattern = "b", Conflict = policy } };
+
+        var job = await Run(queue, [first, second], preset);
+
+        Assert.Equal("first original", File.ReadAllText(first));
+        Assert.Equal("second original", File.ReadAllText(second));
+        Assert.Equal(Path.Combine(dir.Path, "b (2).png"), Assert.Single(job.Files[0].Outputs));
+    }
+
     private static async Task<ConversionJob> Run(JobQueue queue, IReadOnlyList<string> sources, Preset preset)
     {
         var job = new ConversionJob(sources, preset, "Test");

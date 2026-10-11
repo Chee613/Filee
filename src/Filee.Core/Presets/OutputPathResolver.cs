@@ -9,6 +9,13 @@ namespace Filee.Core.Presets;
 /// <summary>Resolves output file paths from <see cref="OutputRule"/>s.</summary>
 public static class OutputPathResolver
 {
+    private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
+    };
+
     /// <summary>Values available to file name pattern tokens.</summary>
     public readonly record struct Tokens(string SourcePath, string PresetName, int Index, DateTime Now);
 
@@ -20,9 +27,10 @@ public static class OutputPathResolver
     /// <param name="targetExtension">Extension of the output, without dot; empty for a folder (archive extraction).</param>
     /// <param name="exists">Returns true if a path is already taken (on disk or reserved by this batch).</param>
     /// <param name="suffix">Optional suffix appended to the name, e.g. <c>"_p3"</c> for page 3.</param>
+    /// <param name="preserve">Paths that must get a numbered alternative under every conflict policy (other inputs or active outputs).</param>
     /// <returns>The path to write, or <c>null</c> when the rule says to skip an existing file.</returns>
     public static string? Resolve(OutputRule rule, Tokens tokens, string targetExtension,
-        Func<string, bool> exists, string? suffix = null)
+        Func<string, bool> exists, string? suffix = null, Func<string, bool>? preserve = null)
     {
         var sourceDir = Path.GetDirectoryName(Path.GetFullPath(tokens.SourcePath)) ?? "";
         var dir = rule.Location switch
@@ -38,20 +46,21 @@ public static class OutputPathResolver
         string PathFor(string baseName) => Path.Combine(dir, ext.Length == 0 ? baseName : $"{baseName}.{ext}");
         var candidate = PathFor(name);
 
-        // The source file is never overwritten, whatever the policy says.
-        var isSource = PathsEqual(candidate, tokens.SourcePath);
-        if (!isSource && !exists(candidate))
+        // Sources and outputs already claimed by a conversion are never overwritten, whatever the policy says.
+        bool IsProtected(string path) => PathsEqual(path, tokens.SourcePath) || preserve?.Invoke(path) == true;
+        var isProtected = IsProtected(candidate);
+        if (!isProtected && !exists(candidate))
             return candidate;
 
-        if (!isSource && rule.Conflict == ConflictPolicy.Overwrite)
+        if (!isProtected && rule.Conflict == ConflictPolicy.Overwrite)
             return candidate;
-        if (!isSource && rule.Conflict == ConflictPolicy.Skip)
+        if (!isProtected && rule.Conflict == ConflictPolicy.Skip)
             return null;
 
         for (var n = 2; ; n++)
         {
             candidate = PathFor($"{name} ({n})");
-            if (!exists(candidate) && !PathsEqual(candidate, tokens.SourcePath))
+            if (!exists(candidate) && !IsProtected(candidate))
                 return candidate;
         }
     }
@@ -118,9 +127,14 @@ public static class OutputPathResolver
         foreach (var c in name)
             sb.Append(invalid.Contains(c) || char.IsControl(c) ? '_' : c);
 
-        var result = sb.ToString().Trim().TrimEnd('.');
-        return result.Length == 0 ? fallback : result;
+        var result = sb.ToString().Trim().TrimEnd('.', ' ');
+        if (result.Length == 0)
+            return Sanitize(fallback, "_");
+        return IsWindowsDeviceName(result) ? "_" + result : result;
     }
+
+    /// <summary>True for a reserved Windows device name, including a name followed by an extension.</summary>
+    public static bool IsWindowsDeviceName(string name) => ReservedNames.Contains(name.Split('.')[0].TrimEnd(' '));
 
     private static bool PathsEqual(string a, string b) =>
         // A Unix mount may still be case-insensitive. Prefer a numbered output to risking the source.

@@ -20,7 +20,7 @@ public sealed class JobQueue : IAsyncDisposable
     private readonly ILogger _log;
     private readonly Channel<ConversionJob> _channel = Channel.CreateUnbounded<ConversionJob>();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _engineGates = new();
-    private readonly HashSet<string> _reservedOutputs = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _reservedOutputs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Task _worker;
 
     /// <param name="catalog">Converters and their priority.</param>
@@ -103,7 +103,7 @@ public sealed class JobQueue : IAsyncDisposable
         finally
         {
             lock (_reservedOutputs)
-                foreach (var output in job.Outputs)
+                foreach (var output in _reservedOutputs.Where(pair => pair.Value == job.Id).Select(pair => pair.Key).ToList())
                     _reservedOutputs.Remove(output);
             TryDelete(workDir);
         }
@@ -406,7 +406,7 @@ public sealed class JobQueue : IAsyncDisposable
         });
 
     private FinalAllocator CreateFinalAllocator(ConversionJob job, string sourcePath, int index) =>
-        new(this, job.Preset.Output, new OutputPathResolver.Tokens(sourcePath, job.PresetDisplayName, index, job.CreatedAt));
+        new(this, job, job.Preset.Output, new OutputPathResolver.Tokens(sourcePath, job.PresetDisplayName, index, job.CreatedAt));
 
     private void Notify(ConversionJob job)
     {
@@ -453,7 +453,7 @@ public sealed class JobQueue : IAsyncDisposable
     }
 
     /// <summary>Allocates final output paths according to the preset's <see cref="OutputRule"/>.</summary>
-    private sealed class FinalAllocator(JobQueue queue, OutputRule rule, OutputPathResolver.Tokens tokens) : IOutputAllocator
+    private sealed class FinalAllocator(JobQueue queue, ConversionJob job, OutputRule rule, OutputPathResolver.Tokens tokens) : IOutputAllocator
     {
         public string? Allocate(string extension, string? suffix = null)
         {
@@ -461,15 +461,26 @@ public sealed class JobQueue : IAsyncDisposable
             lock (queue._reservedOutputs)
             {
                 var path = OutputPathResolver.Resolve(rule, tokens, extension,
-                    p => File.Exists(p) || Directory.Exists(p) || queue._reservedOutputs.Contains(p), suffix);
+                    p => File.Exists(p) || Directory.Exists(p) || queue._reservedOutputs.ContainsKey(p), suffix,
+                    p => IsProtected(p, extension.TrimStart('.').Length == 0));
                 if (path is null)
                     return null;
 
-                queue._reservedOutputs.Add(path);
+                queue._reservedOutputs.Add(path, job.Id);
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 // An empty extension asks for a folder (archive extraction): the converter creates it.
                 return path;
             }
+        }
+
+        // ponytail: scan inputs and reservations; index them if very large batches make allocation expensive.
+        private bool IsProtected(string path, bool isFolder)
+        {
+            var fullPath = Path.GetFullPath(path);
+            var prefix = Path.TrimEndingDirectorySeparator(fullPath) + Path.DirectorySeparatorChar;
+            return job.Sources.Concat(queue._reservedOutputs.Keys).Any(source =>
+                string.Equals(Path.GetFullPath(source), fullPath, StringComparison.OrdinalIgnoreCase)
+                || isFolder && Path.GetFullPath(source).StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
         }
     }
 

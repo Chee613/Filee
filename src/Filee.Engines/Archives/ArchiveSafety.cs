@@ -2,6 +2,7 @@
 // symbolic links, encrypted content and archives that would not fit on the disk. Also the error messages for them.
 
 using System.Globalization;
+using Filee.Core.Presets;
 
 namespace Filee.Engines.Archives;
 
@@ -16,13 +17,6 @@ internal static class ArchiveSafety
 
     private static readonly HashSet<char> InvalidNameChars =
         [.. Path.GetInvalidFileNameChars(), '<', '>', ':', '"', '/', '\\', '|', '?', '*'];
-
-    private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    };
 
     /// <summary>True if an entry path is absolute, starts with a drive, or climbs out of the target with "..".</summary>
     public static bool IsUnsafePath(string entryPath)
@@ -149,7 +143,6 @@ internal static class ArchiveSafety
         var name = new string(chars).TrimEnd('.', ' ');
         if (name.Length == 0)
             return "_";
-        var stem = name.Split('.')[0];
-        return ReservedNames.Contains(stem) ? "_" + name : name;
+        return OutputPathResolver.IsWindowsDeviceName(name) ? "_" + name : name;
     }
 }

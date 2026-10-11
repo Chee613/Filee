@@ -5,6 +5,24 @@ namespace Filee.Core.Tests;
 
 public class OutputPathResolverTests
 {
+    [Theory]
+    [InlineData("CON", "_CON")]
+    [InlineData("nul.notes", "_nul.notes")]
+    [InlineData("COM1", "_COM1")]
+    [InlineData("LPT9", "_LPT9")]
+    [InlineData("COM¹", "_COM¹")]
+    [InlineData("LPT²", "_LPT²")]
+    [InlineData("AUX. ", "_AUX")]
+    [InlineData("report. .", "report")]
+    [InlineData("...", "fallback")]
+    [InlineData("COM10", "COM10")]
+    [InlineData("CONcert", "CONcert")]
+    [InlineData("旅行 photo", "旅行 photo")]
+    public void Output_names_are_valid_on_Windows(string name, string expected)
+    {
+        Assert.Equal(expected, OutputPathResolver.Sanitize(name, "fallback"));
+    }
+
     private static readonly DateTime Now = new(2026, 9, 30, 14, 5, 9);
 
     private static OutputPathResolver.Tokens Tokens(string source, int index = 1) => new(source, "PNG", index, Now);
